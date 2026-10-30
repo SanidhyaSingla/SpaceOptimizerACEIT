@@ -1,17 +1,20 @@
 import { NextResponse } from 'next/server';
 import { GoogleGenAI } from '@google/genai';
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-
 export async function POST(req: Request) {
   try {
-    const { prompt, currentItems } = await req.json();
+    const apiKey = process.env.GEMINI_API_KEY;
 
-    if (!process.env.GEMINI_API_KEY) {
+    if (!apiKey) {
       return NextResponse.json({ 
-        reply: "⚠️ Error: GEMINI_API_KEY is missing in your .env.local file or your dev server wasn't restarted!" 
+        reply: "⚠️ Error: GEMINI_API_KEY is missing in your environment variables!" 
       });
     }
+
+    // Initialize client dynamically inside the request handler
+    const ai = new GoogleGenAI({ apiKey });
+
+    const { prompt, currentItems } = await req.json();
 
     // 1. GENERAL QUESTION MODE (Passes current 3D layout state as context to Gemma 4)
     if (!prompt.includes('Dataset:\n')) {
