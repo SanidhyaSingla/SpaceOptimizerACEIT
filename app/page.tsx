@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import dynamic from 'next/dynamic';
 import { Button } from '@/components/ui/button';
 import * as XLSX from 'xlsx';
@@ -28,6 +28,14 @@ export default function Home() {
     { id: '3', name: 'Box C', x: 20, y: 80, z: 20, dx: 100, dy: 60, dz: 60, color: '#f59e0b' },
   ]);
   const [stepIndex, setStepIndex] = useState(placedItems.length - 1);
+
+  // Ref for auto-scrolling chat terminal
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  // Auto-scroll chat terminal to bottom on new messages
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages, loading]);
 
   // Handle Excel / Text File Upload
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -84,8 +92,7 @@ export default function Home() {
       ? `${displayPrompt}\n\nDataset:\n${uploadedFileContent}` 
       : inputMessage;
 
-    const newMessages = [...messages, { role: 'user', content: displayPrompt }];
-    setMessages(newMessages);
+    setMessages((prev) => [...prev, { role: 'user', content: displayPrompt }]);
     setInputMessage('');
     setLoading(true);
 
@@ -93,14 +100,20 @@ export default function Home() {
       const res = await fetch('/api/gemma', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt: userPayload }),
+        body: JSON.stringify({ 
+          prompt: userPayload,
+          currentItems: placedItems 
+        }),
       });
       const data = await res.json();
 
+      // ONLY update truck dimensions if explicitly returned
       if (data.recommendedTruck) {
         setTruckDim(data.recommendedTruck);
       }
-      if (data.placedItems && Array.isArray(data.placedItems)) {
+
+      // ONLY update 3D items if new coordinates are calculated (prevents resetting on general chat)
+      if (data.placedItems && Array.isArray(data.placedItems) && data.placedItems.length > 0) {
         setPlacedItems(data.placedItems);
         setStepIndex(data.placedItems.length - 1);
       }
@@ -123,7 +136,7 @@ export default function Home() {
   return (
     <main className="h-screen w-screen overflow-hidden bg-slate-950 text-slate-100 flex flex-col font-sans text-base">
       {/* Top Bar */}
-      <header className="h-14 border-b border-slate-800 px-6 flex items-center justify-between bg-slate-900/50 backdrop-blur">
+      <header className="h-14 border-b border-slate-800 px-6 flex items-center justify-between bg-slate-900/50 backdrop-blur shrink-0">
         <div className="flex items-center gap-3">
           <h1 className="font-semibold text-lg tracking-tight">TruckViewer &bull; Gemma 4 Enterprise Workspace</h1>
         </div>
@@ -136,8 +149,8 @@ export default function Home() {
       <div className="flex-1 grid grid-cols-1 lg:grid-cols-12 overflow-hidden">
         
         {/* Left Side: Chat & File Input Panel (4 Cols) */}
-        <div className="lg:col-span-4 border-r border-slate-800 flex flex-col bg-slate-900/30">
-          <div className="p-4 border-b border-slate-800 font-semibold text-sm text-slate-300 flex justify-between items-center">
+        <div className="lg:col-span-4 border-r border-slate-800 flex flex-col bg-slate-900/30 overflow-hidden">
+          <div className="p-4 border-b border-slate-800 font-semibold text-sm text-slate-300 flex justify-between items-center shrink-0">
             <span>AI Processing Terminal</span>
             <label className="cursor-pointer text-xs bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-1.5 rounded-md transition font-medium shadow-sm">
               Upload Dataset
@@ -145,7 +158,7 @@ export default function Home() {
             </label>
           </div>
 
-          {/* Chat Messages */}
+          {/* Scrollable Chat Messages Container */}
           <div className="flex-1 overflow-y-auto p-4 space-y-3">
             {messages.map((m, idx) => (
               <div key={idx} className={`flex flex-col ${m.role === 'user' ? 'items-end' : 'items-start'}`}>
@@ -154,11 +167,12 @@ export default function Home() {
                 </div>
               </div>
             ))}
-            {loading && <div className="text-xs text-slate-400 animate-pulse px-1">Processing dataset through Gemma 4...</div>}
+            {loading && <div className="text-xs text-slate-400 animate-pulse px-1">Processing prompt through Gemma 4...</div>}
+            <div ref={messagesEndRef} />
           </div>
 
-          {/* Chat Input Form */}
-          <form onSubmit={handleSendMessage} className="p-3 border-t border-slate-800 bg-slate-900 flex gap-2">
+          {/* Fixed Chat Input Form */}
+          <form onSubmit={handleSendMessage} className="p-3 border-t border-slate-800 bg-slate-900 flex gap-2 shrink-0">
             <input 
               type="text"
               value={inputMessage}
@@ -171,13 +185,13 @@ export default function Home() {
         </div>
 
         {/* Right Side: 3D Visualization Canvas (8 Cols) */}
-        <div className="lg:col-span-8 flex flex-col bg-slate-950 p-4 relative">
+        <div className="lg:col-span-8 flex flex-col bg-slate-950 p-4 relative overflow-hidden">
           <div className="flex-1 rounded-xl overflow-hidden border border-slate-800 shadow-2xl relative">
             <TruckViewer truckDim={truckDim} items={placedItems} stepIndex={stepIndex} />
           </div>
 
           {/* Step Navigation Bar */}
-          <div className="h-16 mt-3 bg-slate-900/60 border border-slate-800 rounded-xl px-6 flex items-center justify-between">
+          <div className="h-16 mt-3 bg-slate-900/60 border border-slate-800 rounded-xl px-6 flex items-center justify-between shrink-0">
             <span className="text-sm text-slate-400">
               Loading Sequence: Step <strong className="text-slate-100">{stepIndex + 1}</strong> of {placedItems.length}
             </span>

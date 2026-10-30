@@ -12,25 +12,28 @@ interface PlacedItem {
 }
 
 interface TruckProps {
-  truckDim: { length: number; width: number; height: number };
-  items: PlacedItem[];
-  stepIndex: number;
+  truckDim?: { length: number; width: number; height: number };
+  items?: PlacedItem[];
+  stepIndex?: number;
 }
 
-export default function TruckViewer({ truckDim, items, stepIndex }: TruckProps) {
+export default function TruckViewer({ truckDim, items = [], stepIndex = 0 }: TruckProps) {
+  // Safe fallback if truckDim is ever missing or undefined
+  const dim = truckDim || { length: 400, width: 200, height: 200 };
+
   // Filter items based on active loading step
   const visibleItems = items.slice(0, stepIndex + 1);
 
   return (
     <div className="w-full h-[600px] bg-slate-900 rounded-xl overflow-hidden">
-      <Canvas camera={{ position: [truckDim.length * 1.5, truckDim.height * 2, truckDim.width * 2], fov: 50 }}>
+      <Canvas camera={{ position: [dim.length * 1.5, dim.height * 2, dim.width * 2], fov: 50 }}>
         <ambientLight intensity={0.7} />
         <directionalLight position={[100, 200, 100]} intensity={1} />
         <OrbitControls makeDefault />
 
         {/* Truck Container Wireframe Outline */}
-        <mesh position={[truckDim.length / 2, truckDim.height / 2, truckDim.width / 2]}>
-          <boxGeometry args={[truckDim.length, truckDim.height, truckDim.width]} />
+        <mesh position={[dim.length / 2, dim.height / 2, dim.width / 2]}>
+          <boxGeometry args={[dim.length, dim.height, dim.width]} />
           <meshBasicMaterial wireframe color="#64748b" />
         </mesh>
 

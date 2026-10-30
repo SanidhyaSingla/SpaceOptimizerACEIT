@@ -1,9 +1,42 @@
 import { NextResponse } from 'next/server';
+import { GoogleGenAI } from '@google/genai';
+
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 export async function POST(req: Request) {
   try {
-    const { prompt } = await req.json();
+    const { prompt, currentItems } = await req.json();
 
+    if (!process.env.GEMINI_API_KEY) {
+      return NextResponse.json({ 
+        reply: "⚠️ Error: GEMINI_API_KEY is missing in your .env.local file or your dev server wasn't restarted!" 
+      });
+    }
+
+    // 1. GENERAL QUESTION MODE (Passes current 3D layout state as context to Gemma 4)
+    if (!prompt.includes('Dataset:\n')) {
+      const layoutContext = currentItems && currentItems.length > 0 
+        ? `Current items placed in the 3D container: ${JSON.stringify(currentItems)}` 
+        : `No items are currently packed in the container.`;
+
+      const response = await ai.models.generateContent({
+        model: 'gemma-4-26b-a4b-it',
+        contents: [
+          `You are an expert AI logistics and 3D cargo packing assistant powered by Gemma 4 (26B). 
+          
+          ${layoutContext}
+          
+          User question: "${prompt}"
+          
+          Answer the user's question directly and intelligently based on the active cargo items above. Be precise.`
+        ],
+      });
+
+      const aiReply = response.text ? response.text.trim() : "AI response came back empty.";
+      return NextResponse.json({ reply: aiReply });
+    }
+
+    // 2. DATASET PROCESSING & 3D PACKING LOGIC
     let parsedRows: any[] = [];
     try {
       const parts = prompt.split('Dataset:\n');
@@ -14,7 +47,6 @@ export async function POST(req: Request) {
       parsedRows = [];
     }
 
-    // Official truck tiers (matching 20ft container spec)
     const truckTiers = [
       { name: '14-foot truck', length: 420, width: 190, height: 190, volumeM3: 15.63 },
       { name: '17-foot truck', length: 520, width: 210, height: 215, volumeM3: 23.50 },
@@ -22,134 +54,85 @@ export async function POST(req: Request) {
     ];
 
     let totalVolumeCm3 = 0;
-
-    const extractProperty = (row: any, keywords: string[], fallback: number) => {
-      const keys = Object.keys(row);
-      for (const kw of keywords) {
-        const foundKey = keys.find(k => k.toLowerCase().includes(kw.toLowerCase()));
-        if (foundKey && row[foundKey] !== undefined && !isNaN(Number(row[foundKey]))) {
-          return Number(row[foundKey]);
-        }
-      }
-      return fallback;
-    };
-
-    const extractFragile = (row: any) => {
-      const keys = Object.keys(row);
-      for (const k of keys) {
-        if (k.toLowerCase().includes('fragile') || k.toLowerCase().includes('handling') || k.toLowerCase().includes('stack')) {
-          const val = String(row[k]).toLowerCase();
-          if (val.includes('true') || val.includes('yes') || val.includes('1') || val.includes('fragile')) {
-            return true;
-          }
-        }
-      }
-      return false;
-    };
-
     const processedItems = parsedRows.map((row: any, index: number) => {
-      const dx = extractProperty(row, ['length', 'len', 'l', 'dx', 'dim_x'], 40);
-      const dy = extractProperty(row, ['height', 'ht', 'h', 'dy', 'dim_y', 'depth'], 40);
-      const dz = extractProperty(row, ['width', 'wid', 'w', 'dz', 'dim_z', 'breadth'], 40);
-      const isFragile = extractFragile(row);
+      const keys = Object.keys(row);
+      const getVal = (kws: string[], def: number) => {
+        const found = keys.find(k => kws.some(kw => k.toLowerCase().includes(kw)));
+        return found && !isNaN(Number(row[found])) ? Number(row[found]) : def;
+      };
 
-      const nameKey = Object.keys(row).find(k => ['name', 'item', 'itemname', 'description', 'box'].some(kw => k.toLowerCase().includes(kw)));
+      const dx = getVal(['length', 'len', 'l', 'dx'], 40);
+      const dy = getVal(['height', 'ht', 'h', 'dy'], 40);
+      const dz = getVal(['width', 'wid', 'w', 'dz'], 40);
+      const nameKey = keys.find(k => ['name', 'item', 'box'].some(kw => k.toLowerCase().includes(kw)));
       const name = nameKey ? String(row[nameKey]) : `Box ${index + 1}`;
 
       totalVolumeCm3 += (dx * dy * dz);
-
-      return { name, dx, dy, dz, isFragile };
+      return { name, dx, dy, dz, volume: dx * dy * dz };
     });
 
     const totalVolumeM3 = totalVolumeCm3 / 1_000_000;
     const selectedTruck = truckTiers.find(t => t.volumeM3 >= totalVolumeM3) || truckTiers[2];
+    processedItems.sort((a, b) => b.volume - a.volume);
 
-    // Sort: Robust base items first, fragile items on top
-    processedItems.sort((a, b) => (a.isFragile === b.isFragile ? 0 : a.isFragile ? 1 : -1));
+    let gemmaSummary = "Layout computed successfully.";
+    try {
+      const summaryResponse = await ai.models.generateContent({
+        model: 'gemma-4-26b-a4b-it',
+        contents: `Give a 1-sentence logistics summary for ${processedItems.length} items packed in a ${selectedTruck.name}.`
+      });
+      if (summaryResponse.text) {
+        gemmaSummary = summaryResponse.text.trim();
+      }
+    } catch (e) {}
 
-    // SURFACE-LANDING GRAVITY DROP ALGORITHM
-    let currentX = 0;
-    let currentZ = 0;
-    let rowMaxDepth = 0;
-
-    const colors = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#06b6d4', '#eab308'];
+    // BIN PACKING ALGORITHM
+    const colors = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#06b6d4'];
     const placedItems: any[] = [];
     let unallocatedCount = 0;
 
     for (let i = 0; i < processedItems.length; i++) {
       const item = processedItems[i];
+      let placed = false;
+      const coords = [{ x: 0, y: 0, z: 0 }];
 
-      // Wrap X across truck length
-      if (currentX + item.dx > selectedTruck.length) {
-        currentX = 0;
-        currentZ += rowMaxDepth;
-        rowMaxDepth = 0;
+      for (const p of placedItems) {
+        coords.push({ x: p.x + p.dx, y: p.y, z: p.z });
+        coords.push({ x: p.x, y: p.y, z: p.z + p.dz });
+        coords.push({ x: p.x, y: p.y + p.dy, z: p.z });
       }
 
-      // If Z exceeds truck width, wrap back to front and start stacking on previous positions
-      if (currentZ + item.dz > selectedTruck.width) {
-        currentZ = 0;
-        currentX = 0;
-      }
+      for (const pos of coords) {
+        if (pos.x + item.dx > selectedTruck.length || pos.y + item.dy > selectedTruck.height || pos.z + item.dz > selectedTruck.width) continue;
 
-      // Calculate exact landing Y based on what boxes are directly underneath this item's footprint
-      let landingY = 0;
-      const x1 = currentX;
-      const x2 = currentX + item.dx;
-      const z1 = currentZ;
-      const z2 = currentZ + item.dz;
-
-      for (const placed of placedItems) {
-        const pX1 = placed.x;
-        const pX2 = placed.x + placed.dx;
-        const pZ1 = placed.z;
-        const pZ2 = placed.z + placed.dz;
-
-        // Check if footprints overlap in the X-Z plane
-        const overlapX = Math.max(0, Math.min(x2, pX2) - Math.max(x1, pX1));
-        const overlapZ = Math.max(0, Math.min(z2, pZ2) - Math.max(z1, pZ1));
-
-        if (overlapX > 0 && overlapZ > 0) {
-          const topSurface = placed.y + placed.dy;
-          if (topSurface > landingY) {
-            landingY = topSurface;
+        let collision = false;
+        for (const existing of placedItems) {
+          if (pos.x < existing.x + existing.dx && pos.x + item.dx > existing.x &&
+              pos.y < existing.y + existing.dy && pos.y + item.dy > existing.y &&
+              pos.z < existing.z + existing.dz && pos.z + item.dz > existing.z) {
+            collision = true;
+            break;
           }
+        }
+
+        if (!collision) {
+          placedItems.push({ id: `box-${i+1}`, name: item.name, x: pos.x, y: pos.y, z: pos.z, dx: item.dx, dy: item.dy, dz: item.dz, color: colors[i % colors.length] });
+          placed = true;
+          break;
         }
       }
 
-      // Check height limit
-      if (landingY + item.dy > selectedTruck.height) {
-        unallocatedCount++;
-        continue;
-      }
-
-      placedItems.push({
-        id: `unit-${i + 1}`,
-        name: item.name,
-        x: currentX,
-        y: landingY, // Anchored firmly on the floor (0) or directly on top of overlapping boxes!
-        z: currentZ,
-        dx: item.dx,
-        dy: item.dy,
-        dz: item.dz,
-        color: colors[i % colors.length]
-      });
-
-      rowMaxDepth = Math.max(rowMaxDepth, item.dz);
-      currentX += item.dx;
+      if (!placed) unallocatedCount++;
     }
 
-    const reply = `Analysis Complete:\n\n` +
-      `🚛 **Vehicle Selected:** ${selectedTruck.name} (${selectedTruck.length}x${selectedTruck.width}x${selectedTruck.height} cm, ${selectedTruck.volumeM3} m³ capacity).\n\n` +
-      `📦 **Placement Status:** Successfully packed ${placedItems.length} of ${processedItems.length} units using footprint gravity-drop stacking. All items rest securely on the floor or directly on supporting units below. ` +
-      (unallocatedCount > 0 ? `⚠️ ${unallocatedCount} items exceeded vertical container limits.` : `All items fit inside container bounds.`);
-
     return NextResponse.json({
-      reply,
+      reply: `Analysis Complete:\n\n🚛 **Vehicle:** ${selectedTruck.name}\n🤖 **Gemma 4 (26B):** ${gemmaSummary}\n📦 **Packed:** ${placedItems.length}/${processedItems.length} units.`,
       recommendedTruck: { length: selectedTruck.length, width: selectedTruck.width, height: selectedTruck.height },
       placedItems
     });
+
   } catch (error) {
+    console.error('Gemini API Error:', error);
     return NextResponse.json({ error: 'Failed to process optimization logic' }, { status: 500 });
   }
 }
